@@ -251,15 +251,15 @@
     そのときのfirebaseConfigをそのままコピーしてOKです）
    ========================================================= */
 const firebaseConfig = {
-  apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_PROJECT.firebaseapp.com",
-  databaseURL: "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
-  projectId: "YOUR_PROJECT",
-  storageBucket: "YOUR_PROJECT.appspot.com",
-  messagingSenderId: "000000000000",
-  appId: "YOUR_APP_ID"
+  apiKey: "AIzaSyABmK5aGVAdcyL6Ei9nogUp-NOF-BxSOLI",
+  authDomain: "posting-tracker-99ebb.firebaseapp.com",
+  databaseURL: "https://posting-tracker-99ebb-default-rtdb.firebaseio.com",
+  projectId: "posting-tracker-99ebb",
+  storageBucket: "posting-tracker-99ebb.firebasestorage.app",
+  messagingSenderId: "905270977413",
+  appId: "1:905270977413:web:a1f013d1d4073af8711aec"
 };
-const FIREBASE_CONFIGURED = firebaseConfig.apiKey !== "YOUR_API_KEY";
+const FIREBASE_CONFIGURED = firebaseConfig.apiKey !== "YOUR_API_KEY" && !firebaseConfig.databaseURL.includes("YOUR_DATABASE_URL_HERE");
 const DB_PATH = "postingRecords"; // 教室名を分けたい場合はここを変更
 
 let db = null;
