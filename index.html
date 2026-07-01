@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>ポスティング履歴マップ | 学び方の学校</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+<style>
+  :root{
+    --ink:#2b2620;
+    --paper:#f6f3ec;
+    --card:#ffffff;
+    --line:#e4ddcf;
+    --accent:#c85a3c;   /* 朱色系アクセント */
+    --accent-dark:#a8462e;
+    --posted:#3f8f5f;   /* 配布済み: 緑 */
+    --refused:#c0392b;  /* お断り: 赤 */
+    --absent:#8c8577;   /* 不在: グレー */
+    --skip:#5b5347;     /* 対象外: 濃グレー */
+    --lead:#d99a2b;     /* 見込みタグ: 金 */
+    --shadow: 0 6px 20px rgba(43,38,32,0.18);
+  }
+  *{box-sizing:border-box;}
+  html,body{
+    margin:0;padding:0;height:100%;
+    font-family:"Hiragino Sans","Noto Sans JP",-apple-system,BlinkMacSystemFont,sans-serif;
+    background:var(--paper); color:var(--ink);
+    overscroll-behavior:none;
+  }
+  #app{position:fixed;inset:0;display:flex;flex-direction:column;}
+
+  /* --- Top bar --- */
+  #topbar{
+    background:var(--ink); color:var(--paper);
+    padding:10px 12px; display:flex; align-items:center; gap:8px;
+    z-index:1200; box-shadow:0 2px 10px rgba(0,0,0,0.25);
+    flex-wrap:wrap;
+  }
+  #topbar .brand{font-size:13px; letter-spacing:.03em; opacity:.75; white-space:nowrap;}
+  #topbar .title{font-size:16px; font-weight:700; white-space:nowrap;}
+  #topbar .spacer{flex:1;}
+  #staffWrap{display:flex; align-items:center; gap:6px;}
+  #staffWrap label{font-size:11px; opacity:.7;}
+  #staffName{
+    background:rgba(255,255,255,0.12); border:1px solid rgba(255,255,255,0.25);
+    color:#fff; border-radius:8px; padding:6px 8px; font-size:13px; width:92px;
+  }
+  #staffName::placeholder{color:rgba(255,255,255,0.5);}
+  .iconbtn{
+    background:rgba(255,255,255,0.12); border:1px solid rgba(255,255,255,0.25);
+    color:#fff; border-radius:8px; padding:7px 10px; font-size:13px; cursor:pointer;
+  }
+  .iconbtn:active{background:rgba(255,255,255,0.25);}
+
+  /* --- progress strip --- */
+  #progress{
+    background:var(--card); border-bottom:1px solid var(--line);
+    padding:8px 12px; display:flex; gap:14px; align-items:center;
+    font-size:12px; overflow-x:auto; white-space:nowrap; z-index:1100;
+  }
+  #progress b{font-size:14px;}
+  .dot{display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:4px;}
+
+  /* --- map --- */
+  #map{flex:1; width:100%;}
+  .leaflet-container{background:#eae5d8;}
+
+  /* pin colors handled via divIcon inline styles */
+
+  /* --- bottom sheet (entry form) --- */
+  #overlay{
+    position:fixed; inset:0; background:rgba(20,17,12,0.45);
+    display:none; z-index:1400;
+  }
+  #sheet{
+    position:fixed; left:0; right:0; bottom:0;
+    background:var(--card); border-radius:16px 16px 0 0;
+    box-shadow:var(--shadow); z-index:1500;
+    max-height:82vh; overflow-y:auto;
+    transform:translateY(110%); transition:transform .25s ease;
+    padding:16px 18px calc(18px + env(safe-area-inset-bottom));
+  }
+  #sheet.open{transform:translateY(0);}
+  #overlay.open{display:block;}
+  .sheet-handle{width:40px;height:4px;background:var(--line);border-radius:3px;margin:0 auto 12px;}
+  #sheet h3{margin:0 0 4px; font-size:16px;}
+  #sheet .meta{font-size:11px; color:#8c8577; margin-bottom:14px;}
+  .field-label{font-size:12px; font-weight:700; color:#6b6455; margin:14px 0 6px; letter-spacing:.02em;}
+  .status-row{display:flex; gap:8px; flex-wrap:wrap;}
+  .status-chip{
+    flex:1 1 auto; min-width:80px; text-align:center;
+    border:2px solid var(--line); border-radius:10px; padding:10px 6px;
+    font-size:13px; font-weight:600; cursor:pointer; background:#fff; color:var(--ink);
+  }
+  .status-chip[data-s="posted"].active{background:var(--posted); border-color:var(--posted); color:#fff;}
+  .status-chip[data-s="refused"].active{background:var(--refused); border-color:var(--refused); color:#fff;}
+  .status-chip[data-s="absent"].active{background:var(--absent); border-color:var(--absent); color:#fff;}
+  .status-chip[data-s="skip"].active{background:var(--skip); border-color:var(--skip); color:#fff;}
+
+  .tag-row{display:flex; gap:8px; flex-wrap:wrap;}
+  .tag-chip{
+    border:2px solid var(--line); border-radius:20px; padding:7px 12px;
+    font-size:12.5px; cursor:pointer; background:#fff; color:var(--ink);
+  }
+  .tag-chip.active{background:var(--lead); border-color:var(--lead); color:#3a2c05;}
+
+  textarea#memo{
+    width:100%; border:1px solid var(--line); border-radius:10px; padding:10px;
+    font-size:13.5px; font-family:inherit; resize:vertical; min-height:64px;
+  }
+  input#label{
+    width:100%; border:1px solid var(--line); border-radius:10px; padding:10px;
+    font-size:13.5px; font-family:inherit;
+  }
+  .btn-row{display:flex; gap:10px; margin-top:18px;}
+  .btn{
+    flex:1; border:none; border-radius:10px; padding:13px; font-size:14.5px; font-weight:700;
+    cursor:pointer;
+  }
+  .btn-primary{background:var(--accent); color:#fff;}
+  .btn-primary:active{background:var(--accent-dark);}
+  .btn-ghost{background:var(--paper); color:var(--ink); border:1px solid var(--line);}
+  .btn-danger{background:#fff; color:var(--refused); border:1px solid var(--refused); flex:0 0 auto; padding:13px 16px;}
+
+  /* --- filter panel --- */
+  #filterPanel{
+    position:fixed; top:0; right:0; bottom:0; width:280px; max-width:82vw;
+    background:var(--card); box-shadow:-6px 0 20px rgba(0,0,0,0.2);
+    z-index:1600; transform:translateX(100%); transition:transform .25s ease;
+    padding:16px; overflow-y:auto;
+  }
+  #filterPanel.open{transform:translateX(0);}
+  #filterPanel h3{margin:6px 0 14px; font-size:15px;}
+  #filterPanel .field-label{margin-top:16px;}
+  #filterOverlay{position:fixed; inset:0; background:rgba(20,17,12,0.4); z-index:1550; display:none;}
+  #filterOverlay.open{display:block;}
+  .filter-check{display:flex; align-items:center; gap:8px; padding:6px 0; font-size:13.5px;}
+  #searchBox{
+    width:100%; border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:13px;
+  }
+
+  /* --- setup notice --- */
+  #setupNotice{
+    position:fixed; left:12px; right:12px; bottom:12px; z-index:1700;
+    background:#fff8e6; border:1px solid #e8cf8a; color:#5c4a12;
+    border-radius:10px; padding:10px 12px; font-size:12px; line-height:1.5;
+    box-shadow:var(--shadow); display:none;
+  }
+
+  .leaflet-popup-content{font-size:12.5px;}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="topbar">
+    <div class="title">📍 ポスティング履歴マップ</div>
+    <div class="brand">学び方の学校</div>
+    <div class="spacer"></div>
+    <div id="staffWrap">
+      <label>担当</label>
+      <input id="staffName" type="text" placeholder="名前" maxlength="10">
+    </div>
+    <button class="iconbtn" id="filterBtn">絞り込み</button>
+  </div>
+
+  <div id="progress">
+    <span><b id="cntTotal">0</b> 件記録</span>
+    <span><span class="dot" style="background:var(--posted)"></span>配布済み <b id="cntPosted">0</b></span>
+    <span><span class="dot" style="background:var(--refused)"></span>お断り <b id="cntRefused">0</b></span>
+    <span><span class="dot" style="background:var(--absent)"></span>不在 <b id="cntAbsent">0</b></span>
+    <span><span class="dot" style="background:var(--lead)"></span>見込み <b id="cntLead">0</b></span>
+  </div>
+
+  <div id="map"></div>
+</div>
+
+<!-- 入力ボトムシート -->
+<div id="overlay"></div>
+<div id="sheet">
+  <div class="sheet-handle"></div>
+  <h3 id="sheetTitle">新しい記録</h3>
+  <div class="meta" id="sheetMeta"></div>
+
+  <div class="field-label">目印・部屋番号など（任意）</div>
+  <input id="label" type="text" placeholder="例）角の白い家 / ◯◯マンション201">
+
+  <div class="field-label">配布状況</div>
+  <div class="status-row">
+    <div class="status-chip" data-s="posted">✅ 配布済み</div>
+    <div class="status-chip" data-s="refused">🚫 お断り</div>
+    <div class="status-chip" data-s="absent">🔁 不在・再訪</div>
+    <div class="status-chip" data-s="skip">➖ 対象外</div>
+  </div>
+
+  <div class="field-label">気づいたことタグ（複数選択可）</div>
+  <div class="tag-row" id="tagRow">
+    <div class="tag-chip" data-t="bike">🚲 小学生の自転車あり</div>
+    <div class="tag-chip" data-t="kids">🧸 子供用品あり</div>
+    <div class="tag-chip" data-t="new">🏠 新築・リフォーム</div>
+    <div class="tag-chip" data-t="dog">🐕 犬に注意</div>
+    <div class="tag-chip" data-t="apato">🏢 集合住宅</div>
+  </div>
+
+  <div class="field-label">メモ</div>
+  <textarea id="memo" placeholder="自由記入"></textarea>
+
+  <div class="btn-row">
+    <button class="btn btn-danger" id="deleteBtn" style="display:none;">削除</button>
+    <button class="btn btn-ghost" id="cancelBtn">キャンセル</button>
+    <button class="btn btn-primary" id="saveBtn">保存</button>
+  </div>
+</div>
+
+<!-- 絞り込みパネル -->
+<div id="filterOverlay"></div>
+<div id="filterPanel">
+  <h3>絞り込み・検索</h3>
+
+  <div class="field-label">キーワード検索</div>
+  <input id="searchBox" type="text" placeholder="メモ・目印を検索">
+
+  <div class="field-label">配布状況</div>
+  <div class="filter-check"><input type="checkbox" id="fPosted" checked><label for="fPosted">✅ 配布済み</label></div>
+  <div class="filter-check"><input type="checkbox" id="fRefused" checked><label for="fRefused">🚫 お断り</label></div>
+  <div class="filter-check"><input type="checkbox" id="fAbsent" checked><label for="fAbsent">🔁 不在・再訪</label></div>
+  <div class="filter-check"><input type="checkbox" id="fSkip" checked><label for="fSkip">➖ 対象外</label></div>
+
+  <div class="field-label">担当者</div>
+  <select id="fStaff" style="width:100%; padding:8px; border-radius:8px; border:1px solid var(--line); font-size:13px;">
+    <option value="">全員</option>
+  </select>
+
+  <div class="btn-row">
+    <button class="btn btn-ghost" id="fClose">閉じる</button>
+    <button class="btn btn-primary" id="fExport">CSV書き出し</button>
+  </div>
+</div>
+
+<div id="setupNotice">
+  ⚠️ Firebaseが未設定のため、この端末だけに保存されています（他のスタッフとは共有されません）。共有するには、コード内の <code>firebaseConfig</code> をご自身のFirebaseプロジェクトの値に書き換えてください（早押しアプリと同じプロジェクトを流用できます）。
+  <div style="text-align:right; margin-top:6px;"><button class="iconbtn" style="background:#5c4a12;" onclick="document.getElementById('setupNotice').style.display='none'">閉じる</button></div>
+</div>
+
+<script>
+/* =========================================================
+   Firebase設定：ここをご自身のプロジェクトの値に書き換えてください
+   （早押しアプリ hayaoshi-button と同じプロジェクトを使う場合は
+    そのときのfirebaseConfigをそのままコピーしてOKです）
+   ========================================================= */
+const firebaseConfig = {
+  apiKey: "YOUR_API_KEY",
+  authDomain: "YOUR_PROJECT.firebaseapp.com",
+  databaseURL: "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
+  projectId: "YOUR_PROJECT",
+  storageBucket: "YOUR_PROJECT.appspot.com",
+  messagingSenderId: "000000000000",
+  appId: "YOUR_APP_ID"
+};
+const FIREBASE_CONFIGURED = firebaseConfig.apiKey !== "YOUR_API_KEY";
+const DB_PATH = "postingRecords"; // 教室名を分けたい場合はここを変更
+
+let db = null;
+let dbRef = null;
+if (FIREBASE_CONFIGURED) {
+  firebase.initializeApp(firebaseConfig);
+  db = firebase.database();
+  dbRef = db.ref(DB_PATH);
+} else {
+  document.getElementById('setupNotice').style.display = 'block';
+}
+
+/* ---------- ローカルストレージ フォールバック ---------- */
+const LOCAL_KEY = "postingRecords_local_v1";
+function loadLocal(){
+  try { return JSON.parse(localStorage.getItem(LOCAL_KEY) || "{}"); } catch(e){ return {}; }
+}
+function saveLocal(data){ localStorage.setItem(LOCAL_KEY, JSON.stringify(data)); }
+
+/* ---------- 状態 ---------- */
+let records = {};      // id -> record
+let markers = {};       // id -> leaflet marker
+let activeId = null;    // 編集中のレコードID
+let pendingLatLng = null; // 新規登録の座標
+let activeTags = new Set();
+let activeStatus = null;
+
+/* ---------- 地図初期化 ---------- */
+// 教室（個別指導 学び方の学校）付近を中心に表示
+const SCHOOL_LATLNG = [34.8451549, 135.4113889];
+const map = L.map('map', { zoomControl:false, tap:true }).setView(SCHOOL_LATLNG, 16);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19,
+  attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
+L.control.zoom({ position:'bottomright' }).addTo(map);
+
+// 教室マーカー
+L.marker(SCHOOL_LATLNG, {
+  icon: L.divIcon({
+    className:'',
+    html:'<div style="background:#2b2620;color:#fff;font-size:11px;font-weight:700;padding:4px 8px;border-radius:6px;white-space:nowrap;box-shadow:0 2px 6px rgba(0,0,0,.3);">🏫 学び方の学校</div>',
+    iconSize:[0,0]
+  })
+}).addTo(map);
+
+map.on('click', (e) => {
+  openSheetForNew(e.latlng);
+});
+
+/* ---------- ピン見た目 ---------- */
+const STATUS_COLOR = { posted:'#3f8f5f', refused:'#c0392b', absent:'#8c8577', skip:'#5b5347' };
+const STATUS_LABEL  = { posted:'配布済み', refused:'お断り', absent:'不在・再訪', skip:'対象外' };
+const TAG_LABEL = { bike:'🚲 自転車', kids:'🧸 子供用品', new:'🏠 新築', dog:'🐕 犬', apato:'🏢 集合住宅' };
+
+function buildIcon(rec){
+  const color = STATUS_COLOR[rec.status] || '#999';
+  const hasLead = rec.tags && rec.tags.length > 0;
+  const ring = hasLead ? '0 0 0 3px var(--lead-ring, #d99a2b)' : 'none';
+  return L.divIcon({
+    className:'',
+    html:`<div style="width:22px;height:22px;border-radius:50%;background:${color};border:2.5px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4)${hasLead? ', 0 0 0 3px #d99a2b':''};"></div>`,
+    iconSize:[22,22],
+    iconAnchor:[11,11]
+  });
+}
+
+function renderMarker(id, rec){
+  if (markers[id]) { map.removeLayer(markers[id]); }
+  if (!passesFilter(rec)) { delete markers[id]; return; }
+  const m = L.marker([rec.lat, rec.lng], { icon: buildIcon(rec) }).addTo(map);
+  m.on('click', () => openSheetForEdit(id, rec));
+  markers[id] = m;
+}
+
+function renderAll(){
+  Object.keys(markers).forEach(id=>{ if(markers[id]) map.removeLayer(markers[id]); });
+  markers = {};
+  Object.entries(records).forEach(([id, rec]) => renderMarker(id, rec));
+  updateCounters();
+  populateStaffFilter();
+}
+
+function passesFilter(rec){
+  const map_ = {posted:'fPosted', refused:'fRefused', absent:'fAbsent', skip:'fSkip'};
+  const cb = document.getElementById(map_[rec.status]);
+  if (cb && !cb.checked) return false;
+  const staffSel = document.getElementById('fStaff').value;
+  if (staffSel && rec.staff !== staffSel) return false;
+  const q = document.getElementById('searchBox').value.trim();
+  if (q) {
+    const hay = ((rec.label||'') + ' ' + (rec.memo||'')).toLowerCase();
+    if (!hay.includes(q.toLowerCase())) return false;
+  }
+  return true;
+}
+
+function updateCounters(){
+  const vals = Object.values(records);
+  document.getElementById('cntTotal').textContent = vals.length;
+  document.getElementById('cntPosted').textContent = vals.filter(r=>r.status==='posted').length;
+  document.getElementById('cntRefused').textContent = vals.filter(r=>r.status==='refused').length;
+  document.getElementById('cntAbsent').textContent = vals.filter(r=>r.status==='absent').length;
+  document.getElementById('cntLead').textContent = vals.filter(r=>r.tags && r.tags.length>0).length;
+}
+
+function populateStaffFilter(){
+  const sel = document.getElementById('fStaff');
+  const current = sel.value;
+  const names = new Set(Object.values(records).map(r=>r.staff).filter(Boolean));
+  sel.innerHTML = '<option value="">全員</option>' +
+    [...names].sort().map(n=>`<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join('');
+  sel.value = current;
+}
+
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+/* ---------- データ同期 ---------- */
+if (FIREBASE_CONFIGURED) {
+  dbRef.on('value', snap => {
+    records = snap.val() || {};
+    renderAll();
+  });
+} else {
+  records = loadLocal();
+  renderAll();
+}
+
+function persistRecord(id, rec){
+  if (FIREBASE_CONFIGURED) {
+    dbRef.child(id).set(rec);
+  } else {
+    records[id] = rec;
+    saveLocal(records);
+    renderAll();
+  }
+}
+function persistDelete(id){
+  if (FIREBASE_CONFIGURED) {
+    dbRef.child(id).remove();
+  } else {
+    delete records[id];
+    saveLocal(records);
+    renderAll();
+  }
+}
+
+/* ---------- 担当者名の保存 ---------- */
+const staffInput = document.getElementById('staffName');
+staffInput.value = localStorage.getItem('posting_staff_name') || '';
+staffInput.addEventListener('input', () => {
+  localStorage.setItem('posting_staff_name', staffInput.value);
+});
+
+/* ---------- ボトムシート制御 ---------- */
+const sheet = document.getElementById('sheet');
+const overlay = document.getElementById('overlay');
+const sheetTitle = document.getElementById('sheetTitle');
+const sheetMeta = document.getElementById('sheetMeta');
+const labelInput = document.getElementById('label');
+const memoInput = document.getElementById('memo');
+const deleteBtn = document.getElementById('deleteBtn');
+
+function resetForm(){
+  activeStatus = null;
+  activeTags = new Set();
+  labelInput.value = '';
+  memoInput.value = '';
+  document.querySelectorAll('.status-chip').forEach(c=>c.classList.remove('active'));
+  document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('active'));
+}
+
+function openSheet(){
+  overlay.classList.add('open');
+  sheet.classList.add('open');
+}
+function closeSheet(){
+  overlay.classList.remove('open');
+  sheet.classList.remove('open');
+  activeId = null;
+  pendingLatLng = null;
+}
+
+function openSheetForNew(latlng){
+  resetForm();
+  activeId = null;
+  pendingLatLng = latlng;
+  sheetTitle.textContent = '新しい記録';
+  sheetMeta.textContent = `地点: ${latlng.lat.toFixed(5)}, ${latlng.lng.toFixed(5)}`;
+  deleteBtn.style.display = 'none';
+  openSheet();
+}
+
+function openSheetForEdit(id, rec){
+  resetForm();
+  activeId = id;
+  pendingLatLng = null;
+  sheetTitle.textContent = '記録の編集';
+  const when = rec.updatedAt ? new Date(rec.updatedAt).toLocaleString('ja-JP') : '';
+  sheetMeta.textContent = `担当: ${rec.staff||'不明'} ／ 更新: ${when}`;
+  labelInput.value = rec.label || '';
+  memoInput.value = rec.memo || '';
+  activeStatus = rec.status || null;
+  activeTags = new Set(rec.tags || []);
+  if (activeStatus) {
+    const chip = document.querySelector(`.status-chip[data-s="${activeStatus}"]`);
+    if (chip) chip.classList.add('active');
+  }
+  activeTags.forEach(t=>{
+    const chip = document.querySelector(`.tag-chip[data-t="${t}"]`);
+    if (chip) chip.classList.add('active');
+  });
+  deleteBtn.style.display = 'inline-block';
+  openSheet();
+}
+
+document.querySelectorAll('.status-chip').forEach(chip=>{
+  chip.addEventListener('click', ()=>{
+    document.querySelectorAll('.status-chip').forEach(c=>c.classList.remove('active'));
+    chip.classList.add('active');
+    activeStatus = chip.dataset.s;
+  });
+});
+document.querySelectorAll('.tag-chip').forEach(chip=>{
+  chip.addEventListener('click', ()=>{
+    const t = chip.dataset.t;
+    if (activeTags.has(t)) { activeTags.delete(t); chip.classList.remove('active'); }
+    else { activeTags.add(t); chip.classList.add('active'); }
+  });
+});
+
+document.getElementById('cancelBtn').addEventListener('click', closeSheet);
+overlay.addEventListener('click', closeSheet);
+
+document.getElementById('saveBtn').addEventListener('click', ()=>{
+  if (!activeStatus) { alert('配布状況を選択してください'); return; }
+  const staff = staffInput.value.trim();
+  if (!staff) { alert('上部の「担当」欄に名前を入力してください'); staffInput.focus(); return; }
+
+  let id, lat, lng, createdAt;
+  if (activeId) {
+    id = activeId;
+    const existing = records[id];
+    lat = existing.lat; lng = existing.lng; createdAt = existing.createdAt || Date.now();
+  } else {
+    id = 'p' + Date.now() + Math.random().toString(36).slice(2,7);
+    lat = pendingLatLng.lat; lng = pendingLatLng.lng; createdAt = Date.now();
+  }
+
+  const rec = {
+    lat, lng, createdAt,
+    updatedAt: Date.now(),
+    status: activeStatus,
+    tags: [...activeTags],
+    label: labelInput.value.trim(),
+    memo: memoInput.value.trim(),
+    staff
+  };
+  persistRecord(id, rec);
+  closeSheet();
+});
+
+deleteBtn.addEventListener('click', ()=>{
+  if (!activeId) return;
+  if (confirm('この記録を削除しますか？')) {
+    persistDelete(activeId);
+    closeSheet();
+  }
+});
+
+/* ---------- 絞り込みパネル ---------- */
+const filterPanel = document.getElementById('filterPanel');
+const filterOverlay = document.getElementById('filterOverlay');
+document.getElementById('filterBtn').addEventListener('click', ()=>{
+  filterPanel.classList.add('open');
+  filterOverlay.classList.add('open');
+});
+document.getElementById('fClose').addEventListener('click', closeFilter);
+filterOverlay.addEventListener('click', closeFilter);
+function closeFilter(){
+  filterPanel.classList.remove('open');
+  filterOverlay.classList.remove('open');
+}
+['fPosted','fRefused','fAbsent','fSkip','fStaff'].forEach(id=>{
+  document.getElementById(id).addEventListener('change', renderAll);
+});
+document.getElementById('searchBox').addEventListener('input', renderAll);
+
+/* ---------- CSV書き出し ---------- */
+document.getElementById('fExport').addEventListener('click', ()=>{
+  const rows = [['日時','担当','緯度','経度','状況','タグ','目印','メモ']];
+  Object.values(records).forEach(r=>{
+    rows.push([
+      new Date(r.updatedAt||r.createdAt).toLocaleString('ja-JP'),
+      r.staff||'',
+      r.lat, r.lng,
+      STATUS_LABEL[r.status]||r.status,
+      (r.tags||[]).map(t=>TAG_LABEL[t]||t).join(' / '),
+      r.label||'',
+      (r.memo||'').replace(/\n/g,' ')
+    ]);
+  });
+  const csv = rows.map(row => row.map(cell => `"${String(cell).replace(/"/g,'""')}"`).join(',')).join('\r\n');
+  const blob = new Blob(["\uFEFF"+csv], {type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `posting_records_${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+});
+</script>
+</body>
+</html>
