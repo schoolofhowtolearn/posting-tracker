@@ -316,9 +316,11 @@
     <div class="color-swatch" data-c="#2bb3a3" style="background:#2bb3a3;"></div>
   </div>
 
-  <div class="field-label">1軒あたりの想定面積（㎡）</div>
-  <input id="areaAvgLotSize" type="number" min="30" max="1000" step="10" placeholder="150">
-  <div class="meta" id="areaEstimateNote" style="margin-top:6px;"></div>
+  <div class="field-label">建物数（OpenStreetMapの建物データから計算）</div>
+  <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+    <button class="btn btn-ghost" id="areaCalcBtn" type="button" style="flex:0 0 auto; padding:8px 12px; font-size:13px;">🏠 建物数を計算</button>
+    <span id="areaBuildingCountText" style="font-size:12.5px; color:#6b6455;"></span>
+  </div>
 
   <div class="btn-row">
     <button class="btn btn-danger" id="areaDeleteBtn" style="display:none;">削除</button>
@@ -605,7 +607,7 @@ map.on(L.Draw.Event.CREATED, (e) => {
   pendingAreaType = e.layerType; // 'polygon' | 'polyline' | 'rectangle' | 'circle'
   pendingAreaLayer.addTo(map);
   activeAreaId = null;
-  openAreaSheet('担当エリアの登録', '', staffInput.value || '', AREA_COLORS[0], false, null, DEFAULT_AVG_LOT_SIZE);
+  openAreaSheet('担当エリアの登録', '', staffInput.value || '', AREA_COLORS[0], false, null, null);
 });
 
 function extractGeometry(layer, type){
@@ -621,9 +623,7 @@ function extractGeometry(layer, type){
   return { latlngs: ring.map(ll => [ll.lat, ll.lng]) };
 }
 
-/* ---------- 概算軒数・記録件数の計算 ---------- */
-const DEFAULT_AVG_LOT_SIZE = 150; // 1軒あたりの想定面積(㎡)の既定値
-
+/* ---------- 建物数の取得(OpenStreetMapの実データ)・記録件数の計算 ---------- */
 function pointInPolygon(lat, lng, latlngs){
   // レイキャスティング法（緯度経度をそのままx,yとして扱う簡易版・小エリア用）
   let inside = false;
@@ -645,20 +645,51 @@ function distanceMeters(lat1, lng1, lat2, lng2){
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
-function areaSqm(rec){
-  if (rec.type === 'circle') {
-    return Math.PI * rec.radius * rec.radius;
+// 円を多角形近似(Overpassのpolyフィルタに渡すため)
+function circleToPolygon(center, radiusMeters, points){
+  points = points || 32;
+  const [lat, lng] = center;
+  const R = 6371000;
+  const latRad = lat * Math.PI / 180;
+  const ring = [];
+  for (let i = 0; i < points; i++){
+    const angle = (i / points) * 2 * Math.PI;
+    const dx = radiusMeters * Math.cos(angle);
+    const dy = radiusMeters * Math.sin(angle);
+    const dLat = dy / R;
+    const dLng = dx / (R * Math.cos(latRad));
+    ring.push([lat + dLat * 180 / Math.PI, lng + dLng * 180 / Math.PI]);
   }
-  if (rec.type === 'polyline') return null;
-  const latlngs = rec.latlngs.map(ll => L.latLng(ll[0], ll[1]));
-  return L.GeometryUtil.geodesicArea(latlngs);
+  return ring;
 }
 
-function estimateHouses(rec){
-  const sqm = areaSqm(rec);
-  if (sqm === null) return null;
-  const avg = rec.avgLotSize || DEFAULT_AVG_LOT_SIZE;
-  return Math.max(0, Math.round(sqm / avg));
+// Overpass API(OpenStreetMap)から、範囲内の建物(building)の数を取得
+async function fetchBuildingCount(ring){
+  const polyStr = ring.map(ll => `${ll[0]} ${ll[1]}`).join(' ');
+  const query = `[out:json][timeout:25];(way["building"](poly:"${polyStr}");relation["building"](poly:"${polyStr}"););out count;`;
+  const url = 'https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(query);
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('Overpass APIエラー(status: ' + res.status + ')');
+  const data = await res.json();
+  const countEl = (data.elements || []).find(el => el.type === 'count');
+  return countEl ? parseInt(countEl.tags.total, 10) || 0 : 0;
+}
+
+// 現在シート編集中のエリアの、建物数計算に使うリング(緯度経度の配列)を取得
+function getAreaRingForCalc(){
+  if (activeAreaId && areaRecords[activeAreaId]) {
+    const rec = areaRecords[activeAreaId];
+    if (rec.type === 'polyline') return null;
+    if (rec.type === 'circle') return circleToPolygon(rec.center, rec.radius);
+    return rec.latlngs;
+  }
+  if (pendingAreaLayer && pendingAreaType) {
+    if (pendingAreaType === 'polyline') return null;
+    const geom = extractGeometry(pendingAreaLayer, pendingAreaType);
+    if (pendingAreaType === 'circle') return circleToPolygon(geom.center, geom.radius);
+    return geom.latlngs;
+  }
+  return null;
 }
 
 function countRecordsInArea(rec){
@@ -689,17 +720,17 @@ function buildAreaLayer(rec){
 
   let tooltipHtml = `<b>${escapeHtml(rec.label || '')}</b>`;
   if (rec.staff) tooltipHtml += `　${escapeHtml(rec.staff)}`;
-  const estHouses = estimateHouses(rec);
-  if (estHouses !== null) {
+  if (rec.type !== 'polyline') {
     const recordedCount = countRecordsInArea(rec);
-    tooltipHtml += `<br>🏠概算約${estHouses}軒　✅記録${recordedCount}件`;
+    const buildingStr = (typeof rec.buildingCount === 'number') ? `🏠建物${rec.buildingCount}棟` : '🏠建物数未計算';
+    tooltipHtml += `<br>${buildingStr}　✅記録${recordedCount}件`;
   }
   layer.bindTooltip(tooltipHtml, { permanent:true, direction:'center', className:'area-tooltip' });
 
   layer.on('click', (ev) => {
     L.DomEvent.stopPropagation(ev);
     if (isDrawingArea) return;
-    openAreaSheet('担当エリアの編集', rec.label || '', rec.staff || '', rec.color, true, rec.id, rec.avgLotSize);
+    openAreaSheet('担当エリアの編集', rec.label || '', rec.staff || '', rec.color, true, rec.id, rec.buildingCount);
   });
   return layer;
 }
@@ -757,41 +788,50 @@ const areaSheet = document.getElementById('areaSheet');
 const areaSheetTitle = document.getElementById('areaSheetTitle');
 const areaLabelInput = document.getElementById('areaLabel');
 const areaStaffInput = document.getElementById('areaStaff');
-const areaAvgLotSizeInput = document.getElementById('areaAvgLotSize');
-const areaEstimateNote = document.getElementById('areaEstimateNote');
+const areaCalcBtn = document.getElementById('areaCalcBtn');
+const areaBuildingCountText = document.getElementById('areaBuildingCountText');
 const areaDeleteBtn = document.getElementById('areaDeleteBtn');
+let pendingBuildingCount = null;
 
-function updateAreaEstimateNote(){
-  const avg = parseInt(areaAvgLotSizeInput.value, 10) || DEFAULT_AVG_LOT_SIZE;
-  let sqm = null;
-  if (activeAreaId && areaRecords[activeAreaId]) {
-    sqm = areaSqm(areaRecords[activeAreaId]);
-  } else if (pendingAreaLayer && pendingAreaType) {
-    sqm = areaSqm({ type: pendingAreaType, ...extractGeometry(pendingAreaLayer, pendingAreaType) });
-  }
-  if (sqm === null) {
-    areaEstimateNote.textContent = pendingAreaType === 'polyline' ? '（線には軒数の概算はありません）' : '';
+areaCalcBtn.addEventListener('click', async ()=>{
+  const ring = getAreaRingForCalc();
+  if (!ring) {
+    areaBuildingCountText.textContent = '線には建物数の計算はできません';
     return;
   }
-  const est = Math.max(0, Math.round(sqm / avg));
-  areaEstimateNote.textContent = `面積 約${Math.round(sqm)}㎡ → 概算 約${est}軒`;
-}
-areaAvgLotSizeInput.addEventListener('input', updateAreaEstimateNote);
+  const prevLabel = areaCalcBtn.textContent;
+  areaCalcBtn.disabled = true;
+  areaCalcBtn.textContent = '計算中…';
+  areaBuildingCountText.textContent = '';
+  try {
+    const count = await fetchBuildingCount(ring);
+    pendingBuildingCount = count;
+    areaBuildingCountText.textContent = `この範囲内の建物: 約${count}棟`;
+  } catch (err) {
+    console.error('建物数取得エラー:', err);
+    areaBuildingCountText.textContent = '取得に失敗しました。通信環境をご確認のうえ再度お試しください。';
+  } finally {
+    areaCalcBtn.disabled = false;
+    areaCalcBtn.textContent = prevLabel;
+  }
+});
 
-function openAreaSheet(title, label, staff, color, isEdit, id, avgLotSize){
+function openAreaSheet(title, label, staff, color, isEdit, id, buildingCount){
   areaSheetTitle.textContent = title;
   areaLabelInput.value = label;
   areaStaffInput.value = staff;
-  areaAvgLotSizeInput.value = avgLotSize || DEFAULT_AVG_LOT_SIZE;
   selectedAreaColor = color;
   document.querySelectorAll('.color-swatch').forEach(sw=>{
     sw.classList.toggle('active', sw.dataset.c === color);
   });
   areaDeleteBtn.style.display = isEdit ? 'inline-block' : 'none';
   activeAreaId = isEdit ? id : null;
+  pendingBuildingCount = (typeof buildingCount === 'number') ? buildingCount : null;
+  areaBuildingCountText.textContent = (typeof buildingCount === 'number')
+    ? `この範囲内の建物: 約${buildingCount}棟（前回計算時点）`
+    : '';
   areaOverlay.classList.add('open');
   areaSheet.classList.add('open');
-  updateAreaEstimateNote();
 }
 function closeAreaSheet(){
   areaOverlay.classList.remove('open');
@@ -815,20 +855,19 @@ areaOverlay.addEventListener('click', closeAreaSheet);
 document.getElementById('areaSaveBtn').addEventListener('click', ()=>{
   const label = areaLabelInput.value.trim();
   const staff = areaStaffInput.value.trim();
-  const avgLotSize = parseInt(areaAvgLotSizeInput.value, 10) || DEFAULT_AVG_LOT_SIZE;
   if (!label) { alert('エリア名を入力してください'); return; }
 
   if (activeAreaId) {
-    // 既存エリアの名前・担当・色・想定面積を更新(形は変更しない)
+    // 既存エリアの名前・担当・色・建物数を更新(形は変更しない)
     const existing = areaRecords[activeAreaId];
-    const rec = { ...existing, label, staff, color: selectedAreaColor, avgLotSize, updatedAt: Date.now() };
+    const rec = { ...existing, label, staff, color: selectedAreaColor, buildingCount: pendingBuildingCount, updatedAt: Date.now() };
     persistArea(activeAreaId, rec);
   } else {
     // 新規エリア
     if (!pendingAreaLayer) { closeAreaSheet(); return; }
     const id = 'a' + Date.now() + Math.random().toString(36).slice(2,7);
     const geom = extractGeometry(pendingAreaLayer, pendingAreaType);
-    const rec = { type: pendingAreaType, ...geom, label, staff, color: selectedAreaColor, avgLotSize, createdAt: Date.now(), updatedAt: Date.now() };
+    const rec = { type: pendingAreaType, ...geom, label, staff, color: selectedAreaColor, buildingCount: pendingBuildingCount, createdAt: Date.now(), updatedAt: Date.now() };
     map.removeLayer(pendingAreaLayer);
     pendingAreaLayer = null;
     pendingAreaType = null;
