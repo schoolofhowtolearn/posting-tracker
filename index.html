@@ -5,7 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>ポスティング履歴マップ | 学び方の学校</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
@@ -55,6 +57,7 @@
     color:#fff; border-radius:8px; padding:7px 10px; font-size:13px; cursor:pointer;
   }
   .iconbtn:active{background:rgba(255,255,255,0.25);}
+  .iconbtn.active{background:var(--accent); border-color:var(--accent);}
 
   /* --- progress strip --- */
   #progress{
@@ -167,6 +170,29 @@
   }
   #legend .tagline{margin-top:5px; border-top:1px solid var(--line); padding-top:5px; color:#6b6455;}
 
+  /* --- area sheet --- */
+  #areaOverlay{
+    position:fixed; inset:0; background:rgba(20,17,12,0.45);
+    display:none; z-index:1400;
+  }
+  #areaOverlay.open{display:block;}
+  #areaSheet{
+    position:fixed; left:0; right:0; bottom:0;
+    background:var(--card); border-radius:16px 16px 0 0;
+    box-shadow:var(--shadow); z-index:1500;
+    max-height:80vh; overflow-y:auto;
+    transform:translateY(110%); transition:transform .25s ease;
+    padding:16px 18px calc(18px + env(safe-area-inset-bottom));
+  }
+  #areaSheet.open{transform:translateY(0);}
+  #areaSheet h3{margin:0 0 14px; font-size:16px;}
+  .color-row{display:flex; gap:10px; flex-wrap:wrap;}
+  .color-swatch{
+    width:34px; height:34px; border-radius:50%; cursor:pointer;
+    border:3px solid transparent; box-shadow:0 1px 3px rgba(0,0,0,.3);
+  }
+  .color-swatch.active{border-color:var(--ink);}
+
 </style>
 </head>
 <body>
@@ -179,6 +205,8 @@
       <label>担当</label>
       <input id="staffName" type="text" placeholder="名前" maxlength="10">
     </div>
+    <button class="iconbtn" id="locateBtn">📍現在地</button>
+    <button class="iconbtn" id="areaModeBtn">🖊️ エリア描画</button>
     <button class="iconbtn" id="filterBtn">絞り込み</button>
   </div>
 
@@ -237,6 +265,35 @@
   </div>
 </div>
 
+<!-- エリア情報入力シート -->
+<div id="areaOverlay"></div>
+<div id="areaSheet">
+  <div class="sheet-handle"></div>
+  <h3 id="areaSheetTitle">担当エリアの登録</h3>
+
+  <div class="field-label">エリア名</div>
+  <input id="areaLabel" type="text" placeholder="例）1丁目 明峰中周辺">
+
+  <div class="field-label">担当</div>
+  <input id="areaStaff" type="text" placeholder="担当者名" maxlength="10">
+
+  <div class="field-label">色</div>
+  <div class="color-row" id="colorRow">
+    <div class="color-swatch" data-c="#e07b39" style="background:#e07b39;"></div>
+    <div class="color-swatch" data-c="#3b82c4" style="background:#3b82c4;"></div>
+    <div class="color-swatch" data-c="#4caf7d" style="background:#4caf7d;"></div>
+    <div class="color-swatch" data-c="#a855c9" style="background:#a855c9;"></div>
+    <div class="color-swatch" data-c="#e0475a" style="background:#e0475a;"></div>
+    <div class="color-swatch" data-c="#2bb3a3" style="background:#2bb3a3;"></div>
+  </div>
+
+  <div class="btn-row">
+    <button class="btn btn-danger" id="areaDeleteBtn" style="display:none;">削除</button>
+    <button class="btn btn-ghost" id="areaCancelBtn">キャンセル</button>
+    <button class="btn btn-primary" id="areaSaveBtn">保存</button>
+  </div>
+</div>
+
 <!-- 絞り込みパネル -->
 <div id="filterOverlay"></div>
 <div id="filterPanel">
@@ -255,6 +312,9 @@
   <select id="fStaff" style="width:100%; padding:8px; border-radius:8px; border:1px solid var(--line); font-size:13px;">
     <option value="">全員</option>
   </select>
+
+  <div class="field-label">表示</div>
+  <div class="filter-check"><input type="checkbox" id="fShowAreas" checked><label for="fShowAreas">🖊️ 担当エリアを表示</label></div>
 
   <div class="btn-row">
     <button class="btn btn-ghost" id="fClose">閉じる</button>
@@ -284,14 +344,17 @@ const firebaseConfig = {
 };
 const FIREBASE_CONFIGURED = firebaseConfig.apiKey !== "YOUR_API_KEY" && !firebaseConfig.databaseURL.includes("YOUR_DATABASE_URL_HERE");
 const DB_PATH = "postingRecords"; // 教室名を分けたい場合はここを変更
+const AREA_DB_PATH = "areaShapes";
 
 let db = null;
 let dbRef = null;
+let areaRef = null;
 let auth = null;
 if (FIREBASE_CONFIGURED) {
   firebase.initializeApp(firebaseConfig);
   db = firebase.database();
   dbRef = db.ref(DB_PATH);
+  areaRef = db.ref(AREA_DB_PATH);
   auth = firebase.auth();
 } else {
   document.getElementById('setupNotice').style.display = 'block';
@@ -303,6 +366,12 @@ function loadLocal(){
   try { return JSON.parse(localStorage.getItem(LOCAL_KEY) || "{}"); } catch(e){ return {}; }
 }
 function saveLocal(data){ localStorage.setItem(LOCAL_KEY, JSON.stringify(data)); }
+
+const AREA_LOCAL_KEY = "areaShapes_local_v1";
+function loadAreaLocal(){
+  try { return JSON.parse(localStorage.getItem(AREA_LOCAL_KEY) || "{}"); } catch(e){ return {}; }
+}
+function saveAreaLocal(data){ localStorage.setItem(AREA_LOCAL_KEY, JSON.stringify(data)); }
 
 /* ---------- 状態 ---------- */
 let records = {};      // id -> record
@@ -332,7 +401,273 @@ L.marker(SCHOOL_LATLNG, {
 }).addTo(map);
 
 map.on('click', (e) => {
+  if (isDrawingArea) return;
   openSheetForNew(e.latlng);
+});
+
+/* ---------- 現在地表示 ---------- */
+let userMarker = null;
+let userAccuracyCircle = null;
+let watchId = null;
+let hasCenteredOnUser = false;
+
+function updateUserMarker(lat, lng, accuracy){
+  const latlng = [lat, lng];
+  if (!userMarker) {
+    userMarker = L.marker(latlng, {
+      icon: L.divIcon({
+        className:'',
+        html:'<div style="width:16px;height:16px;border-radius:50%;background:#1a73e8;border:3px solid #fff;box-shadow:0 0 0 2px rgba(26,115,232,.35),0 1px 4px rgba(0,0,0,.4);"></div>',
+        iconSize:[16,16], iconAnchor:[8,8]
+      }),
+      zIndexOffset: 1000
+    }).addTo(map);
+    userMarker.bindTooltip('現在地', {direction:'top'});
+  } else {
+    userMarker.setLatLng(latlng);
+  }
+  if (!userAccuracyCircle) {
+    userAccuracyCircle = L.circle(latlng, {
+      radius: accuracy, color:'#1a73e8', weight:1, fillColor:'#1a73e8', fillOpacity:0.12
+    }).addTo(map);
+  } else {
+    userAccuracyCircle.setLatLng(latlng);
+    userAccuracyCircle.setRadius(accuracy);
+  }
+}
+
+function startLocationWatch(){
+  if (!navigator.geolocation) {
+    alert('この端末・ブラウザは位置情報に対応していません');
+    return;
+  }
+  if (watchId !== null) {
+    if (userMarker) map.setView(userMarker.getLatLng(), Math.max(map.getZoom(), 17));
+    return;
+  }
+  watchId = navigator.geolocation.watchPosition(
+    pos => {
+      const { latitude, longitude, accuracy } = pos.coords;
+      updateUserMarker(latitude, longitude, accuracy);
+      if (!hasCenteredOnUser) {
+        map.setView([latitude, longitude], 17);
+        hasCenteredOnUser = true;
+      }
+    },
+    err => {
+      console.error('位置情報エラー:', err);
+      alert('現在地を取得できませんでした。ブラウザ・端末側で位置情報の利用を許可しているかご確認ください。\n\nエラー: ' + err.message);
+      watchId = null;
+    },
+    { enableHighAccuracy:true, maximumAge:5000, timeout:15000 }
+  );
+}
+
+document.getElementById('locateBtn').addEventListener('click', startLocationWatch);
+// ページを開いたら自動で現在地取得を試みる(ブラウザによっては許可ダイアログが出ます)
+startLocationWatch();
+
+/* ================= 担当エリア(図形)描画 ================= */
+const AREA_COLORS = ['#e07b39','#3b82c4','#4caf7d','#a855c9','#e0475a','#2bb3a3'];
+let areaRecords = {};      // id -> エリアレコード
+let areaLayers = {};       // id -> leafletレイヤー
+const areaLayerGroup = L.layerGroup().addTo(map);
+
+const drawControl = new L.Control.Draw({
+  position: 'topleft',
+  edit: false,
+  draw: {
+    polygon: { shapeOptions:{ color:'#e07b39', weight:3 }, showArea:false },
+    polyline: { shapeOptions:{ color:'#e07b39', weight:3 } },
+    rectangle: { shapeOptions:{ color:'#e07b39', weight:3 } },
+    circle: { shapeOptions:{ color:'#e07b39', weight:3 } },
+    marker: false,
+    circlemarker: false
+  }
+});
+
+let isAreaModeOn = false;
+let isDrawingArea = false;
+let pendingAreaLayer = null;
+let pendingAreaType = null;
+let activeAreaId = null;
+let selectedAreaColor = AREA_COLORS[0];
+
+document.getElementById('areaModeBtn').addEventListener('click', () => {
+  isAreaModeOn = !isAreaModeOn;
+  document.getElementById('areaModeBtn').classList.toggle('active', isAreaModeOn);
+  if (isAreaModeOn) { drawControl.addTo(map); } else { map.removeControl(drawControl); }
+});
+
+map.on(L.Draw.Event.DRAWSTART, () => { isDrawingArea = true; });
+map.on(L.Draw.Event.DRAWSTOP, () => { isDrawingArea = false; });
+
+map.on(L.Draw.Event.CREATED, (e) => {
+  pendingAreaLayer = e.layer;
+  pendingAreaType = e.layerType; // 'polygon' | 'polyline' | 'rectangle' | 'circle'
+  pendingAreaLayer.addTo(map);
+  activeAreaId = null;
+  openAreaSheet('担当エリアの登録', '', staffInput.value || '', AREA_COLORS[0], false);
+});
+
+function extractGeometry(layer, type){
+  if (type === 'circle') {
+    const c = layer.getLatLng();
+    return { center: [c.lat, c.lng], radius: layer.getRadius() };
+  }
+  if (type === 'polyline') {
+    return { latlngs: layer.getLatLngs().map(ll => [ll.lat, ll.lng]) };
+  }
+  // polygon / rectangle
+  const ring = layer.getLatLngs()[0];
+  return { latlngs: ring.map(ll => [ll.lat, ll.lng]) };
+}
+
+function buildAreaLayer(rec){
+  const style = { color: rec.color, weight: 3, fillColor: rec.color, fillOpacity: rec.type === 'polyline' ? 0 : 0.18 };
+  let layer;
+  if (rec.type === 'circle') {
+    layer = L.circle(rec.center, { radius: rec.radius, ...style });
+  } else if (rec.type === 'polyline') {
+    layer = L.polyline(rec.latlngs, style);
+  } else {
+    layer = L.polygon(rec.latlngs, style);
+  }
+  if (rec.label) {
+    layer.bindTooltip(`${rec.label}${rec.staff ? '（'+rec.staff+'）' : ''}`, { permanent:false, direction:'center', className:'' });
+  }
+  layer.on('click', (ev) => {
+    L.DomEvent.stopPropagation(ev);
+    if (isDrawingArea) return;
+    openAreaSheet('担当エリアの編集', rec.label || '', rec.staff || '', rec.color, true, rec.id);
+  });
+  return layer;
+}
+
+function renderAllAreas(){
+  areaLayerGroup.clearLayers();
+  areaLayers = {};
+  Object.entries(areaRecords).forEach(([id, rec]) => {
+    const layer = buildAreaLayer({ ...rec, id });
+    layer.addTo(areaLayerGroup);
+    areaLayers[id] = layer;
+  });
+}
+
+function persistArea(id, rec){
+  if (FIREBASE_CONFIGURED) {
+    const doSet = () => {
+      areaRef.child(id).set(rec).catch(err => {
+        console.error('エリア保存エラー:', err);
+        alert('エリアの保存に失敗しました。通信環境をご確認のうえ、もう一度お試しください。\n\nエラー: ' + err.message);
+      });
+    };
+    if (authReady) { doSet(); } else { pendingActions.push(doSet); }
+  } else {
+    areaRecords[id] = rec;
+    saveAreaLocal(areaRecords);
+    renderAllAreas();
+  }
+}
+function persistAreaDelete(id){
+  if (FIREBASE_CONFIGURED) {
+    const doRemove = () => {
+      areaRef.child(id).remove().catch(err => {
+        console.error('エリア削除エラー:', err);
+        alert('エリアの削除に失敗しました。通信環境をご確認のうえ、もう一度お試しください。\n\nエラー: ' + err.message);
+      });
+    };
+    if (authReady) { doRemove(); } else { pendingActions.push(doRemove); }
+  } else {
+    delete areaRecords[id];
+    saveAreaLocal(areaRecords);
+    renderAllAreas();
+  }
+}
+
+if (!FIREBASE_CONFIGURED) {
+  areaRecords = loadAreaLocal();
+  renderAllAreas();
+}
+// FIREBASE_CONFIGUREDの場合のareaRef.on('value',...)購読は、認証完了後のブロックで開始します(下記参照)
+
+/* ---------- エリアシート制御 ---------- */
+const areaOverlay = document.getElementById('areaOverlay');
+const areaSheet = document.getElementById('areaSheet');
+const areaSheetTitle = document.getElementById('areaSheetTitle');
+const areaLabelInput = document.getElementById('areaLabel');
+const areaStaffInput = document.getElementById('areaStaff');
+const areaDeleteBtn = document.getElementById('areaDeleteBtn');
+
+function openAreaSheet(title, label, staff, color, isEdit, id){
+  areaSheetTitle.textContent = title;
+  areaLabelInput.value = label;
+  areaStaffInput.value = staff;
+  selectedAreaColor = color;
+  document.querySelectorAll('.color-swatch').forEach(sw=>{
+    sw.classList.toggle('active', sw.dataset.c === color);
+  });
+  areaDeleteBtn.style.display = isEdit ? 'inline-block' : 'none';
+  activeAreaId = isEdit ? id : null;
+  areaOverlay.classList.add('open');
+  areaSheet.classList.add('open');
+}
+function closeAreaSheet(){
+  areaOverlay.classList.remove('open');
+  areaSheet.classList.remove('open');
+  if (pendingAreaLayer) { map.removeLayer(pendingAreaLayer); pendingAreaLayer = null; pendingAreaType = null; }
+  activeAreaId = null;
+}
+
+document.querySelectorAll('.color-swatch').forEach(sw=>{
+  sw.addEventListener('click', ()=>{
+    document.querySelectorAll('.color-swatch').forEach(s=>s.classList.remove('active'));
+    sw.classList.add('active');
+    selectedAreaColor = sw.dataset.c;
+  });
+});
+
+document.getElementById('areaCancelBtn').addEventListener('click', closeAreaSheet);
+areaOverlay.addEventListener('click', closeAreaSheet);
+
+document.getElementById('areaSaveBtn').addEventListener('click', ()=>{
+  const label = areaLabelInput.value.trim();
+  const staff = areaStaffInput.value.trim();
+  if (!label) { alert('エリア名を入力してください'); return; }
+
+  if (activeAreaId) {
+    // 既存エリアの名前・担当・色のみ更新(形は変更しない)
+    const existing = areaRecords[activeAreaId];
+    const rec = { ...existing, label, staff, color: selectedAreaColor, updatedAt: Date.now() };
+    persistArea(activeAreaId, rec);
+  } else {
+    // 新規エリア
+    if (!pendingAreaLayer) { closeAreaSheet(); return; }
+    const id = 'a' + Date.now() + Math.random().toString(36).slice(2,7);
+    const geom = extractGeometry(pendingAreaLayer, pendingAreaType);
+    const rec = { type: pendingAreaType, ...geom, label, staff, color: selectedAreaColor, createdAt: Date.now(), updatedAt: Date.now() };
+    map.removeLayer(pendingAreaLayer);
+    pendingAreaLayer = null;
+    pendingAreaType = null;
+    persistArea(id, rec);
+  }
+  areaOverlay.classList.remove('open');
+  areaSheet.classList.remove('open');
+  activeAreaId = null;
+});
+
+areaDeleteBtn.addEventListener('click', ()=>{
+  if (!activeAreaId) return;
+  if (confirm('このエリアを削除しますか？')) {
+    persistAreaDelete(activeAreaId);
+    areaOverlay.classList.remove('open');
+    areaSheet.classList.remove('open');
+    activeAreaId = null;
+  }
+});
+
+document.getElementById('fShowAreas').addEventListener('change', (e)=>{
+  if (e.target.checked) { map.addLayer(areaLayerGroup); } else { map.removeLayer(areaLayerGroup); }
 });
 
 /* ---------- ピン見た目 ---------- */
@@ -426,6 +761,10 @@ if (FIREBASE_CONFIGURED) {
       dbRef.on('value', snap => {
         records = snap.val() || {};
         renderAll();
+      });
+      areaRef.on('value', snap => {
+        areaRecords = snap.val() || {};
+        renderAllAreas();
       });
       const queued = pendingActions;
       pendingActions = [];
