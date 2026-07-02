@@ -660,6 +660,7 @@ let isDrawingArea = false;
 let pendingAreaLayer = null;
 let pendingAreaType = null;
 let activeAreaId = null;
+let activeAreaRec = null; // 編集中エリアの完全なレコード(保存時の図形データ消失を防ぐため保持)
 let selectedAreaColor = AREA_COLORS[0];
 let drawControl = createDrawControl(selectedAreaColor);
 document.documentElement.style.setProperty('--area-draw-color', selectedAreaColor);
@@ -811,6 +812,7 @@ function buildAreaLayer(rec){
     // エリア描画モードがOFFの時は、エリア図形の上でも通常どおり地図クリック(家の記録登録)を優先させる
     if (!isAreaModeOn) return;
     L.DomEvent.stopPropagation(ev);
+    activeAreaRec = rec; // 図形データ込みで保持しておく(保存時のフォールバック用)
     openAreaSheet('担当エリアの編集', rec.label || '', rec.staff || '', rec.color, true, rec.id, rec.buildingCount);
   });
   return layer;
@@ -820,9 +822,14 @@ function renderAllAreas(){
   areaLayerGroup.clearLayers();
   areaLayers = {};
   Object.entries(areaRecords).forEach(([id, rec]) => {
-    const layer = buildAreaLayer({ ...rec, id });
-    layer.addTo(areaLayerGroup);
-    areaLayers[id] = layer;
+    if (!rec || !rec.type) { console.warn('図形データが無いエリアをスキップしました:', id); return; }
+    try {
+      const layer = buildAreaLayer({ ...rec, id });
+      layer.addTo(areaLayerGroup);
+      areaLayers[id] = layer;
+    } catch (e) {
+      console.error('エリア描画に失敗しました:', id, e);
+    }
   });
 }
 
@@ -919,6 +926,7 @@ function closeAreaSheet(){
   areaSheet.classList.remove('open');
   if (pendingAreaLayer) { map.removeLayer(pendingAreaLayer); pendingAreaLayer = null; pendingAreaType = null; }
   activeAreaId = null;
+  activeAreaRec = null;
 }
 
 document.querySelectorAll('.color-swatch').forEach(sw=>{
@@ -940,7 +948,12 @@ document.getElementById('areaSaveBtn').addEventListener('click', ()=>{
 
   if (activeAreaId) {
     // 既存エリアの名前・担当・色・建物数を更新(形は変更しない)
-    const existing = areaRecords[activeAreaId];
+    const existing = areaRecords[activeAreaId] || activeAreaRec;
+    if (!existing || !existing.type) {
+      alert('このエリアの図形データを読み込めませんでした。お手数ですが、このエリアを削除して描き直してください。');
+      closeAreaSheet();
+      return;
+    }
     const rec = { ...existing, label, staff, color: selectedAreaColor, buildingCount: pendingBuildingCount, updatedAt: Date.now() };
     persistArea(activeAreaId, rec);
   } else {
