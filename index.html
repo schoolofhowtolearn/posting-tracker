@@ -156,6 +156,35 @@
 
   .leaflet-popup-content{font-size:12.5px;}
 
+  /* --- エリア描画中の頂点マーカー(□)を小さく・エリア色に --- */
+  .leaflet-editing-icon{
+    width: 7px !important;
+    height: 7px !important;
+    margin-top: -4px !important;
+    margin-left: -4px !important;
+    background: var(--area-draw-color, #e07b39) !important;
+    border: 1.5px solid #fff !important;
+    box-shadow: 0 0 2px rgba(0,0,0,.5);
+  }
+  .leaflet-div-icon.leaflet-editing-icon.leaflet-drawing-icon{
+    background: var(--area-draw-color, #e07b39) !important;
+  }
+
+  .area-tooltip{
+    background: rgba(255,255,255,0.94) !important;
+    border: none !important;
+    box-shadow: 0 1px 5px rgba(0,0,0,.3);
+    font-size: 11px !important;
+    line-height: 1.5;
+    padding: 4px 8px !important;
+    border-radius: 7px !important;
+    color: var(--ink);
+    text-align: center;
+    white-space: nowrap;
+  }
+  .area-tooltip::before{ display:none !important; }
+
+
   /* --- legend --- */
   #legend{
     position:fixed; left:10px; bottom:14px; z-index:900;
@@ -287,6 +316,10 @@
     <div class="color-swatch" data-c="#2bb3a3" style="background:#2bb3a3;"></div>
   </div>
 
+  <div class="field-label">1軒あたりの想定面積（㎡）</div>
+  <input id="areaAvgLotSize" type="number" min="30" max="1000" step="10" placeholder="150">
+  <div class="meta" id="areaEstimateNote" style="margin-top:6px;"></div>
+
   <div class="btn-row">
     <button class="btn btn-danger" id="areaDeleteBtn" style="display:none;">削除</button>
     <button class="btn btn-ghost" id="areaCancelBtn">キャンセル</button>
@@ -410,6 +443,9 @@ let userMarker = null;
 let userAccuracyCircle = null;
 let watchId = null;
 let hasCenteredOnUser = false;
+let headingConeEl = null;
+let headingWatchStarted = false;
+let currentHeading = null;
 
 function updateUserMarker(lat, lng, accuracy){
   const latlng = [lat, lng];
@@ -417,12 +453,17 @@ function updateUserMarker(lat, lng, accuracy){
     userMarker = L.marker(latlng, {
       icon: L.divIcon({
         className:'',
-        html:'<div style="width:16px;height:16px;border-radius:50%;background:#1a73e8;border:3px solid #fff;box-shadow:0 0 0 2px rgba(26,115,232,.35),0 1px 4px rgba(0,0,0,.4);"></div>',
-        iconSize:[16,16], iconAnchor:[8,8]
+        html:`<div style="position:relative;width:32px;height:32px;">
+          <div class="heading-cone" style="position:absolute;left:50%;top:50%;width:0;height:0;margin-left:-9px;margin-top:-16px;border-left:9px solid transparent;border-right:9px solid transparent;border-bottom:16px solid rgba(26,115,232,0.45);transform-origin:50% 100%;display:none;"></div>
+          <div style="position:absolute;left:50%;top:50%;width:16px;height:16px;margin-left:-8px;margin-top:-8px;border-radius:50%;background:#1a73e8;border:3px solid #fff;box-shadow:0 0 0 2px rgba(26,115,232,.35),0 1px 4px rgba(0,0,0,.4);"></div>
+        </div>`,
+        iconSize:[32,32], iconAnchor:[16,16]
       }),
       zIndexOffset: 1000
     }).addTo(map);
     userMarker.bindTooltip('現在地', {direction:'top'});
+    headingConeEl = userMarker.getElement() ? userMarker.getElement().querySelector('.heading-cone') : null;
+    if (currentHeading !== null) updateHeadingCone(currentHeading);
   } else {
     userMarker.setLatLng(latlng);
   }
@@ -436,11 +477,56 @@ function updateUserMarker(lat, lng, accuracy){
   }
 }
 
+function updateHeadingCone(deg){
+  currentHeading = deg;
+  if (!headingConeEl && userMarker && userMarker.getElement()) {
+    headingConeEl = userMarker.getElement().querySelector('.heading-cone');
+  }
+  if (headingConeEl) {
+    headingConeEl.style.display = 'block';
+    headingConeEl.style.transform = `rotate(${deg}deg)`;
+  }
+}
+
+function handleOrientation(event){
+  let heading = null;
+  if (typeof event.webkitCompassHeading === 'number' && !isNaN(event.webkitCompassHeading)) {
+    heading = event.webkitCompassHeading; // iOS Safari(真北から時計回り、そのまま使える)
+  } else if (typeof event.alpha === 'number') {
+    heading = 360 - event.alpha; // Android等の近似値
+  }
+  if (heading !== null) updateHeadingCone(heading);
+}
+
+function startHeadingWatch(){
+  if (headingWatchStarted) return;
+  if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+    // iOS 13+ は明示的な許可(ユーザー操作起点)が必要
+    DeviceOrientationEvent.requestPermission().then(state => {
+      if (state === 'granted') {
+        headingWatchStarted = true;
+        window.addEventListener('deviceorientation', handleOrientation, true);
+      } else {
+        console.warn('方位センサーの利用が許可されませんでした');
+      }
+    }).catch(err => console.error('方位センサー許可エラー:', err));
+  } else if ('ondeviceorientationabsolute' in window) {
+    headingWatchStarted = true;
+    window.addEventListener('deviceorientationabsolute', handleOrientation, true);
+  } else if (typeof DeviceOrientationEvent !== 'undefined') {
+    headingWatchStarted = true;
+    window.addEventListener('deviceorientation', handleOrientation, true);
+  } else {
+    console.warn('この端末・ブラウザは方位センサーに対応していません');
+  }
+}
+
 function startLocationWatch(){
   if (!navigator.geolocation) {
     alert('この端末・ブラウザは位置情報に対応していません');
     return;
   }
+  startHeadingWatch(); // ボタンのタップ(ユーザー操作)を起点に方位センサーの利用も試みる
   if (watchId !== null) {
     if (userMarker) map.setView(userMarker.getLatLng(), Math.max(map.getZoom(), 17));
     return;
@@ -473,18 +559,20 @@ let areaRecords = {};      // id -> エリアレコード
 let areaLayers = {};       // id -> leafletレイヤー
 const areaLayerGroup = L.layerGroup().addTo(map);
 
-const drawControl = new L.Control.Draw({
-  position: 'topleft',
-  edit: false,
-  draw: {
-    polygon: { shapeOptions:{ color:'#e07b39', weight:3 }, showArea:false },
-    polyline: { shapeOptions:{ color:'#e07b39', weight:3 } },
-    rectangle: { shapeOptions:{ color:'#e07b39', weight:3 } },
-    circle: { shapeOptions:{ color:'#e07b39', weight:3 } },
-    marker: false,
-    circlemarker: false
-  }
-});
+function createDrawControl(color){
+  return new L.Control.Draw({
+    position: 'topleft',
+    edit: false,
+    draw: {
+      polygon: { shapeOptions:{ color:color, weight:3 }, showArea:false },
+      polyline: { shapeOptions:{ color:color, weight:3 } },
+      rectangle: { shapeOptions:{ color:color, weight:3 } },
+      circle: { shapeOptions:{ color:color, weight:3 } },
+      marker: false,
+      circlemarker: false
+    }
+  });
+}
 
 let isAreaModeOn = false;
 let isDrawingArea = false;
@@ -492,6 +580,16 @@ let pendingAreaLayer = null;
 let pendingAreaType = null;
 let activeAreaId = null;
 let selectedAreaColor = AREA_COLORS[0];
+let drawControl = createDrawControl(selectedAreaColor);
+document.documentElement.style.setProperty('--area-draw-color', selectedAreaColor);
+
+function setDrawColor(color){
+  document.documentElement.style.setProperty('--area-draw-color', color);
+  const wasOn = isAreaModeOn;
+  if (wasOn) map.removeControl(drawControl);
+  drawControl = createDrawControl(color);
+  if (wasOn) drawControl.addTo(map);
+}
 
 document.getElementById('areaModeBtn').addEventListener('click', () => {
   isAreaModeOn = !isAreaModeOn;
@@ -507,7 +605,7 @@ map.on(L.Draw.Event.CREATED, (e) => {
   pendingAreaType = e.layerType; // 'polygon' | 'polyline' | 'rectangle' | 'circle'
   pendingAreaLayer.addTo(map);
   activeAreaId = null;
-  openAreaSheet('担当エリアの登録', '', staffInput.value || '', AREA_COLORS[0], false);
+  openAreaSheet('担当エリアの登録', '', staffInput.value || '', AREA_COLORS[0], false, null, DEFAULT_AVG_LOT_SIZE);
 });
 
 function extractGeometry(layer, type){
@@ -523,6 +621,61 @@ function extractGeometry(layer, type){
   return { latlngs: ring.map(ll => [ll.lat, ll.lng]) };
 }
 
+/* ---------- 概算軒数・記録件数の計算 ---------- */
+const DEFAULT_AVG_LOT_SIZE = 150; // 1軒あたりの想定面積(㎡)の既定値
+
+function pointInPolygon(lat, lng, latlngs){
+  // レイキャスティング法（緯度経度をそのままx,yとして扱う簡易版・小エリア用）
+  let inside = false;
+  for (let i = 0, j = latlngs.length - 1; i < latlngs.length; j = i++) {
+    const yi = latlngs[i][0], xi = latlngs[i][1];
+    const yj = latlngs[j][0], xj = latlngs[j][1];
+    const intersect = ((yi > lat) !== (yj > lat)) &&
+      (lng < (xj - xi) * (lat - yi) / (yj - yi) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function distanceMeters(lat1, lng1, lat2, lng2){
+  const R = 6371000;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+function areaSqm(rec){
+  if (rec.type === 'circle') {
+    return Math.PI * rec.radius * rec.radius;
+  }
+  if (rec.type === 'polyline') return null;
+  const latlngs = rec.latlngs.map(ll => L.latLng(ll[0], ll[1]));
+  return L.GeometryUtil.geodesicArea(latlngs);
+}
+
+function estimateHouses(rec){
+  const sqm = areaSqm(rec);
+  if (sqm === null) return null;
+  const avg = rec.avgLotSize || DEFAULT_AVG_LOT_SIZE;
+  return Math.max(0, Math.round(sqm / avg));
+}
+
+function countRecordsInArea(rec){
+  let count = 0;
+  Object.values(records).forEach(r => {
+    if (typeof r.lat !== 'number' || typeof r.lng !== 'number') return;
+    if (rec.type === 'circle') {
+      if (distanceMeters(r.lat, r.lng, rec.center[0], rec.center[1]) <= rec.radius) count++;
+    } else if (rec.type === 'polyline') {
+      // 線には内包の概念がないためカウント対象外
+    } else {
+      if (pointInPolygon(r.lat, r.lng, rec.latlngs)) count++;
+    }
+  });
+  return count;
+}
+
 function buildAreaLayer(rec){
   const style = { color: rec.color, weight: 3, fillColor: rec.color, fillOpacity: rec.type === 'polyline' ? 0 : 0.18 };
   let layer;
@@ -533,13 +686,20 @@ function buildAreaLayer(rec){
   } else {
     layer = L.polygon(rec.latlngs, style);
   }
-  if (rec.label) {
-    layer.bindTooltip(`${rec.label}${rec.staff ? '（'+rec.staff+'）' : ''}`, { permanent:false, direction:'center', className:'' });
+
+  let tooltipHtml = `<b>${escapeHtml(rec.label || '')}</b>`;
+  if (rec.staff) tooltipHtml += `　${escapeHtml(rec.staff)}`;
+  const estHouses = estimateHouses(rec);
+  if (estHouses !== null) {
+    const recordedCount = countRecordsInArea(rec);
+    tooltipHtml += `<br>🏠概算約${estHouses}軒　✅記録${recordedCount}件`;
   }
+  layer.bindTooltip(tooltipHtml, { permanent:true, direction:'center', className:'area-tooltip' });
+
   layer.on('click', (ev) => {
     L.DomEvent.stopPropagation(ev);
     if (isDrawingArea) return;
-    openAreaSheet('担当エリアの編集', rec.label || '', rec.staff || '', rec.color, true, rec.id);
+    openAreaSheet('担当エリアの編集', rec.label || '', rec.staff || '', rec.color, true, rec.id, rec.avgLotSize);
   });
   return layer;
 }
@@ -597,12 +757,32 @@ const areaSheet = document.getElementById('areaSheet');
 const areaSheetTitle = document.getElementById('areaSheetTitle');
 const areaLabelInput = document.getElementById('areaLabel');
 const areaStaffInput = document.getElementById('areaStaff');
+const areaAvgLotSizeInput = document.getElementById('areaAvgLotSize');
+const areaEstimateNote = document.getElementById('areaEstimateNote');
 const areaDeleteBtn = document.getElementById('areaDeleteBtn');
 
-function openAreaSheet(title, label, staff, color, isEdit, id){
+function updateAreaEstimateNote(){
+  const avg = parseInt(areaAvgLotSizeInput.value, 10) || DEFAULT_AVG_LOT_SIZE;
+  let sqm = null;
+  if (activeAreaId && areaRecords[activeAreaId]) {
+    sqm = areaSqm(areaRecords[activeAreaId]);
+  } else if (pendingAreaLayer && pendingAreaType) {
+    sqm = areaSqm({ type: pendingAreaType, ...extractGeometry(pendingAreaLayer, pendingAreaType) });
+  }
+  if (sqm === null) {
+    areaEstimateNote.textContent = pendingAreaType === 'polyline' ? '（線には軒数の概算はありません）' : '';
+    return;
+  }
+  const est = Math.max(0, Math.round(sqm / avg));
+  areaEstimateNote.textContent = `面積 約${Math.round(sqm)}㎡ → 概算 約${est}軒`;
+}
+areaAvgLotSizeInput.addEventListener('input', updateAreaEstimateNote);
+
+function openAreaSheet(title, label, staff, color, isEdit, id, avgLotSize){
   areaSheetTitle.textContent = title;
   areaLabelInput.value = label;
   areaStaffInput.value = staff;
+  areaAvgLotSizeInput.value = avgLotSize || DEFAULT_AVG_LOT_SIZE;
   selectedAreaColor = color;
   document.querySelectorAll('.color-swatch').forEach(sw=>{
     sw.classList.toggle('active', sw.dataset.c === color);
@@ -611,6 +791,7 @@ function openAreaSheet(title, label, staff, color, isEdit, id){
   activeAreaId = isEdit ? id : null;
   areaOverlay.classList.add('open');
   areaSheet.classList.add('open');
+  updateAreaEstimateNote();
 }
 function closeAreaSheet(){
   areaOverlay.classList.remove('open');
@@ -624,6 +805,7 @@ document.querySelectorAll('.color-swatch').forEach(sw=>{
     document.querySelectorAll('.color-swatch').forEach(s=>s.classList.remove('active'));
     sw.classList.add('active');
     selectedAreaColor = sw.dataset.c;
+    setDrawColor(selectedAreaColor); // 次に描く図形の線・頂点マーカーの色にも反映
   });
 });
 
@@ -633,19 +815,20 @@ areaOverlay.addEventListener('click', closeAreaSheet);
 document.getElementById('areaSaveBtn').addEventListener('click', ()=>{
   const label = areaLabelInput.value.trim();
   const staff = areaStaffInput.value.trim();
+  const avgLotSize = parseInt(areaAvgLotSizeInput.value, 10) || DEFAULT_AVG_LOT_SIZE;
   if (!label) { alert('エリア名を入力してください'); return; }
 
   if (activeAreaId) {
-    // 既存エリアの名前・担当・色のみ更新(形は変更しない)
+    // 既存エリアの名前・担当・色・想定面積を更新(形は変更しない)
     const existing = areaRecords[activeAreaId];
-    const rec = { ...existing, label, staff, color: selectedAreaColor, updatedAt: Date.now() };
+    const rec = { ...existing, label, staff, color: selectedAreaColor, avgLotSize, updatedAt: Date.now() };
     persistArea(activeAreaId, rec);
   } else {
     // 新規エリア
     if (!pendingAreaLayer) { closeAreaSheet(); return; }
     const id = 'a' + Date.now() + Math.random().toString(36).slice(2,7);
     const geom = extractGeometry(pendingAreaLayer, pendingAreaType);
-    const rec = { type: pendingAreaType, ...geom, label, staff, color: selectedAreaColor, createdAt: Date.now(), updatedAt: Date.now() };
+    const rec = { type: pendingAreaType, ...geom, label, staff, color: selectedAreaColor, avgLotSize, createdAt: Date.now(), updatedAt: Date.now() };
     map.removeLayer(pendingAreaLayer);
     pendingAreaLayer = null;
     pendingAreaType = null;
@@ -712,6 +895,7 @@ function renderAll(){
   Object.entries(records).forEach(([id, rec]) => renderMarker(id, rec));
   updateCounters();
   populateStaffFilter();
+  if (typeof renderAllAreas === 'function') renderAllAreas(); // エリア内の記録件数表示を最新化
 }
 
 function passesFilter(rec){
