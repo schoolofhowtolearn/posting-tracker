@@ -146,6 +146,22 @@
     width:100%; border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:13px;
   }
 
+  /* --- route panel --- */
+  #routePanel{
+    position:fixed; top:0; right:0; bottom:0; width:280px; max-width:82vw;
+    background:var(--card); box-shadow:-6px 0 20px rgba(0,0,0,0.2);
+    z-index:1600; transform:translateX(100%); transition:transform .25s ease;
+    padding:16px; overflow-y:auto;
+  }
+  #routePanel.open{transform:translateX(0);}
+  #routePanel h3{margin:6px 0 14px; font-size:15px;}
+  #routePanel .field-label{margin-top:16px;}
+  #routeOverlay{position:fixed; inset:0; background:rgba(20,17,12,0.4); z-index:1550; display:none;}
+  #routeOverlay.open{display:block;}
+  #routeStaffInput, #routeDateInput{
+    width:100%; border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:13px; font-family:inherit;
+  }
+
   /* --- setup notice --- */
   #setupNotice{
     position:fixed; left:12px; right:12px; bottom:12px; z-index:1700;
@@ -236,6 +252,7 @@
     </div>
     <button class="iconbtn" id="locateBtn">📍現在地</button>
     <button class="iconbtn" id="areaModeBtn">🖊️ エリア描画</button>
+    <button class="iconbtn" id="routeBtn">🧭 経路</button>
     <button class="iconbtn" id="filterBtn">絞り込み</button>
   </div>
 
@@ -354,6 +371,30 @@
   <div class="btn-row">
     <button class="btn btn-ghost" id="fClose">閉じる</button>
     <button class="btn btn-primary" id="fExport">CSV書き出し</button>
+  </div>
+</div>
+
+<!-- 経路表示パネル -->
+<div id="routeOverlay"></div>
+<div id="routePanel">
+  <h3>🧭 スタッフの移動経路</h3>
+
+  <div class="field-label">担当者</div>
+  <input id="routeStaffInput" type="text" list="routeStaffList" placeholder="担当者名">
+  <datalist id="routeStaffList"></datalist>
+
+  <div class="field-label">日付</div>
+  <input id="routeDateInput" type="date">
+
+  <div class="btn-row">
+    <button class="btn btn-ghost" id="routeClearBtn">消す</button>
+    <button class="btn btn-primary" id="routeShowBtn">表示</button>
+  </div>
+
+  <div class="meta" id="routeSummary" style="margin-top:10px;"></div>
+
+  <div class="btn-row" style="margin-top:20px;">
+    <button class="btn btn-ghost" id="routeCloseBtn" style="flex:1;">閉じる</button>
   </div>
 </div>
 
@@ -537,6 +578,7 @@ function startLocationWatch(){
     pos => {
       const { latitude, longitude, accuracy } = pos.coords;
       updateUserMarker(latitude, longitude, accuracy);
+      maybeLogTrackPoint(latitude, longitude, accuracy, pos.timestamp);
       if (!hasCenteredOnUser) {
         map.setView([latitude, longitude], 17);
         hasCenteredOnUser = true;
@@ -549,6 +591,42 @@ function startLocationWatch(){
     },
     { enableHighAccuracy:true, maximumAge:5000, timeout:15000 }
   );
+}
+
+/* ---------- 経路ログの記録(担当者・日付ごとにFirebaseへ保存) ---------- */
+let lastTrackPoint = null;
+
+function formatDateLocal(d){
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function sanitizeKey(s){
+  return s.replace(/[.#$\[\]\/]/g, '_');
+}
+
+function maybeLogTrackPoint(lat, lng, accuracy, timestamp){
+  if (!FIREBASE_CONFIGURED) return; // 経路の共有閲覧はFirebase利用時のみ
+  const staff = staffInput.value.trim();
+  if (!staff) return; // 担当者名が未入力の間は記録しない
+  if (accuracy && accuracy > 60) return; // 精度が悪すぎる位置は記録しない
+  const now = timestamp || Date.now();
+  if (lastTrackPoint) {
+    const dist = distanceMeters(lat, lng, lastTrackPoint.lat, lastTrackPoint.lng);
+    const elapsed = now - lastTrackPoint.t;
+    if (dist < 15 && elapsed < 20000) return; // 近すぎる・短時間すぎる移動は間引く
+  }
+  lastTrackPoint = { lat, lng, t: now };
+  const dateStr = formatDateLocal(new Date(now));
+  const key = sanitizeKey(staff);
+  const doPush = () => {
+    db.ref(`trackLogs/${dateStr}/${key}`).push({ lat, lng, t: now }).catch(err => {
+      console.error('経路記録エラー:', err);
+    });
+  };
+  if (authReady) { doPush(); } else { pendingActions.push(doPush); }
 }
 
 document.getElementById('locateBtn').addEventListener('click', startLocationWatch);
@@ -1199,6 +1277,98 @@ document.getElementById('fExport').addEventListener('click', ()=>{
   a.download = `posting_records_${new Date().toISOString().slice(0,10)}.csv`;
   a.click();
   URL.revokeObjectURL(url);
+});
+
+/* ---------- 経路表示パネル ---------- */
+const routePanel = document.getElementById('routePanel');
+const routeOverlay = document.getElementById('routeOverlay');
+const routeStaffInput = document.getElementById('routeStaffInput');
+const routeDateInput = document.getElementById('routeDateInput');
+const routeSummary = document.getElementById('routeSummary');
+const routeShowBtn = document.getElementById('routeShowBtn');
+let routeLayer = null;
+let routeMarkers = [];
+
+function populateRouteStaffOptions(){
+  const dl = document.getElementById('routeStaffList');
+  const names = new Set(Object.values(records).map(r => r.staff).filter(Boolean));
+  if (staffInput.value.trim()) names.add(staffInput.value.trim());
+  dl.innerHTML = [...names].sort().map(n => `<option value="${escapeHtml(n)}"></option>`).join('');
+}
+
+document.getElementById('routeBtn').addEventListener('click', () => {
+  populateRouteStaffOptions();
+  if (!routeDateInput.value) routeDateInput.value = formatDateLocal(new Date());
+  if (!routeStaffInput.value) routeStaffInput.value = staffInput.value.trim();
+  routePanel.classList.add('open');
+  routeOverlay.classList.add('open');
+});
+function closeRoutePanel(){
+  routePanel.classList.remove('open');
+  routeOverlay.classList.remove('open');
+}
+document.getElementById('routeCloseBtn').addEventListener('click', closeRoutePanel);
+routeOverlay.addEventListener('click', closeRoutePanel);
+
+function clearRoute(){
+  if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
+  routeMarkers.forEach(m => map.removeLayer(m));
+  routeMarkers = [];
+  routeSummary.textContent = '';
+}
+document.getElementById('routeClearBtn').addEventListener('click', clearRoute);
+
+async function loadRoute(staff, dateStr){
+  clearRoute();
+  if (!FIREBASE_CONFIGURED) {
+    routeSummary.textContent = 'この機能はFirebase共有が設定されている場合のみ使えます。';
+    return;
+  }
+  if (!staff) { alert('担当者名を入力してください'); return; }
+  const key = sanitizeKey(staff);
+  routeShowBtn.disabled = true;
+  routeSummary.textContent = '読み込み中…';
+  try {
+    const snap = await db.ref(`trackLogs/${dateStr}/${key}`).once('value');
+    const data = snap.val();
+    if (!data) {
+      routeSummary.textContent = 'この日・この担当者の記録は見つかりませんでした。';
+      return;
+    }
+    const points = Object.values(data).sort((a, b) => a.t - b.t);
+    if (points.length < 2) {
+      routeSummary.textContent = `記録が${points.length}件しかなく、経路を表示できません。`;
+      return;
+    }
+    const latlngs = points.map(p => [p.lat, p.lng]);
+    routeLayer = L.polyline(latlngs, { color:'#1a73e8', weight:4, opacity:0.85, dashArray:'1,8', lineCap:'round' }).addTo(map);
+    const startMarker = L.circleMarker(latlngs[0], { radius:7, color:'#fff', weight:2, fillColor:'#3f8f5f', fillOpacity:1 })
+      .bindTooltip('出発', { permanent:false, direction:'top' }).addTo(map);
+    const endMarker = L.circleMarker(latlngs[latlngs.length - 1], { radius:7, color:'#fff', weight:2, fillColor:'#c0392b', fillOpacity:1 })
+      .bindTooltip('最新', { permanent:false, direction:'top' }).addTo(map);
+    routeMarkers = [startMarker, endMarker];
+    map.fitBounds(routeLayer.getBounds(), { padding:[30,30] });
+
+    const startTime = new Date(points[0].t).toLocaleTimeString('ja-JP', { hour:'2-digit', minute:'2-digit' });
+    const endTime = new Date(points[points.length - 1].t).toLocaleTimeString('ja-JP', { hour:'2-digit', minute:'2-digit' });
+    let totalDist = 0;
+    for (let i = 1; i < latlngs.length; i++) {
+      totalDist += distanceMeters(latlngs[i-1][0], latlngs[i-1][1], latlngs[i][0], latlngs[i][1]);
+    }
+    routeSummary.textContent = `${points.length}地点｜${startTime}〜${endTime}｜移動距離 約${(totalDist/1000).toFixed(1)}km`;
+  } catch (err) {
+    console.error('経路取得エラー:', err);
+    routeSummary.textContent = '取得に失敗しました。通信環境をご確認のうえ再度お試しください。';
+  } finally {
+    routeShowBtn.disabled = false;
+  }
+}
+
+routeShowBtn.addEventListener('click', () => {
+  const staff = routeStaffInput.value.trim();
+  const date = routeDateInput.value;
+  if (!date) { alert('日付を選択してください'); return; }
+  loadRoute(staff, date);
 });
 </script>
 </body>
