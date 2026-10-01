@@ -1112,17 +1112,27 @@ let authReady = false;
 let pendingActions = [];
 
 let listenersOn = false;
+function onDenied(err){
+  // 許可リストに入っていないアカウントでログインした場合
+  console.error('読み込み権限エラー:', err);
+  stopListeners();
+  const gate = document.getElementById('loginGate');
+  const msgEl = document.getElementById('loginMsg');
+  if (msgEl) { msgEl.textContent = 'このアカウントには利用の許可がありません。教室長に連絡してください。'; msgEl.className = ''; }
+  auth.signOut();
+  if (gate) gate.hidden = false;
+}
 function startListeners(){
   if (listenersOn) return;
   listenersOn = true;
   dbRef.on('value', snap => {
     records = snap.val() || {};
     renderAll();
-  });
+  }, onDenied);
   areaRef.on('value', snap => {
     areaRecords = snap.val() || {};
     renderAllAreas();
-  });
+  }, onDenied);
 }
 function stopListeners(){
   if (!listenersOn) return;
